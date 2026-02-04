@@ -2,6 +2,7 @@
 Gradio UI for TRELLIS.2 Multi-View 3D Generation
 
 Supports uploading multiple view images and tweaking all sampler parameters.
+Features live logging and quality metrics.
 """
 
 import os
@@ -12,6 +13,7 @@ import gradio as gr
 from datetime import datetime
 import shutil
 import cv2
+import time
 from typing import *
 import torch
 import numpy as np
@@ -21,12 +23,42 @@ import io
 from trellis2.pipelines import Trellis2MultiViewPipeline
 from trellis2.renderers import EnvMap
 from trellis2.utils import render_utils
+from trellis2.utils.quality_metrics import compute_quality_metrics, format_metrics_report
 import o_voxel
 
 
 MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp_multiview')
 MAX_IMAGES = 8  # Maximum number of input views supported
+
+
+class GenerationLogger:
+    """Helper class for formatted generation logging."""
+
+    def __init__(self):
+        self.logs = []
+        self.start_time = None
+
+    def reset(self):
+        self.logs = []
+        self.start_time = time.time()
+
+    def log(self, message: str) -> str:
+        """Add a timestamped log message and return full log string."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        self.logs.append(entry)
+        return "\n".join(self.logs)
+
+    def elapsed(self) -> float:
+        """Get elapsed time since reset."""
+        if self.start_time is None:
+            return 0.0
+        return time.time() - self.start_time
+
+    def format_elapsed(self) -> str:
+        """Format elapsed time as string."""
+        return f"{self.elapsed():.1f}s"
 
 
 def image_to_base64(image):
@@ -86,10 +118,15 @@ def generate_3d(
     # Export params
     decimation_target: int,
     texture_size: int,
+    # Metrics option
+    compute_metrics: bool,
     req: gr.Request,
     progress=gr.Progress(track_tqdm=True),
 ):
-    """Generate 3D model from multiple view images."""
+    """Generate 3D model from multiple view images with live logging."""
+    logger = GenerationLogger()
+    logger.reset()
+
     # Filter out None images
     valid_images = [img for img in images if img is not None]
 
@@ -111,37 +148,171 @@ def generate_3d(
     }
     pt = pipeline_type_map[pipeline_type]
 
-    # Run multi-view generation
-    mesh = pipeline.run_multi_image(
-        valid_images,
-        seed=seed,
-        mode=mode.lower(),
-        pipeline_type=pt,
-        preprocess_image=False,  # Already preprocessed
-        sparse_structure_sampler_params={
-            "steps": ss_steps,
-            "guidance_strength": ss_guidance_strength,
-            "guidance_rescale": ss_guidance_rescale,
-            "rescale_t": ss_rescale_t,
-        },
-        shape_slat_sampler_params={
-            "steps": shape_steps,
-            "guidance_strength": shape_guidance_strength,
-            "guidance_rescale": shape_guidance_rescale,
-            "rescale_t": shape_rescale_t,
-        },
-        tex_slat_sampler_params={
-            "steps": tex_steps,
-            "guidance_strength": tex_guidance_strength,
-            "guidance_rescale": tex_guidance_rescale,
-            "rescale_t": tex_rescale_t,
-        },
-    )[0]
+    # Determine cascade info for logging
+    is_cascade = 'cascade' in pt
+    shape_passes = 2 if is_cascade else 1
+
+    # Yield: Starting
+    yield (
+        logger.log(f"Starting generation with {len(valid_images)} view(s)..."),
+        None, None, None,  # video, model, download
+        None, None, None, None,  # metrics report, dino, lpips, ssim
+    )
+
+    # === Stage 1: Sparse Structure ===
+    yield (
+        logger.log(f"Stage 1/4: Sampling Sparse Structure ({ss_steps} steps)..."),
+        None, None, None, None, None, None, None,
+    )
+
+    stage_start = time.time()
+
+    # Get conditioning
+    cond_512 = pipeline.get_cond_multi(valid_images, 512)
+    cond_1024 = pipeline.get_cond_multi(valid_images, 1024) if pt != '512' else None
+
+    torch.manual_seed(seed)
+    num_images = len(valid_images)
+
+    ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pt]
+
+    with pipeline.inject_sampler_multi_image(
+        pipeline.sparse_structure_sampler, num_images, ss_steps, mode.lower()
+    ):
+        coords = pipeline.sample_sparse_structure(
+            cond_512, ss_res, 1,
+            {
+                "steps": ss_steps,
+                "guidance_strength": ss_guidance_strength,
+                "guidance_rescale": ss_guidance_rescale,
+                "rescale_t": ss_rescale_t,
+            }
+        )
+
+    stage_time = time.time() - stage_start
+    yield (
+        logger.log(f"Stage 1/4: Complete ({stage_time:.1f}s)"),
+        None, None, None, None, None, None, None,
+    )
+
+    # === Stage 2: Shape Latent ===
+    stage_desc = f"Stage 2/4: Sampling Shape Latent ({shape_steps} steps"
+    if is_cascade:
+        stage_desc += ", 2-pass cascade"
+    stage_desc += ")..."
+
+    yield (
+        logger.log(stage_desc),
+        None, None, None, None, None, None, None,
+    )
+
+    stage_start = time.time()
+
+    shape_sampler_params = {
+        "steps": shape_steps,
+        "guidance_strength": shape_guidance_strength,
+        "guidance_rescale": shape_guidance_rescale,
+        "rescale_t": shape_rescale_t,
+    }
+
+    if pt == '512':
+        with pipeline.inject_sampler_multi_image(
+            pipeline.shape_slat_sampler, num_images, shape_steps, mode.lower()
+        ):
+            shape_slat = pipeline.sample_shape_slat(
+                cond_512, pipeline.models['shape_slat_flow_model_512'],
+                coords, shape_sampler_params
+            )
+        res = 512
+
+    elif pt == '1024':
+        with pipeline.inject_sampler_multi_image(
+            pipeline.shape_slat_sampler, num_images, shape_steps, mode.lower()
+        ):
+            shape_slat = pipeline.sample_shape_slat(
+                cond_1024, pipeline.models['shape_slat_flow_model_1024'],
+                coords, shape_sampler_params
+            )
+        res = 1024
+
+    elif pt in ['1024_cascade', '1536_cascade']:
+        target_res = 1024 if pt == '1024_cascade' else 1536
+
+        with pipeline.inject_sampler_multi_image(
+            pipeline.shape_slat_sampler, num_images, shape_steps * 2, mode.lower()
+        ):
+            shape_slat, res = pipeline.sample_shape_slat_cascade(
+                cond_512, cond_1024,
+                pipeline.models['shape_slat_flow_model_512'],
+                pipeline.models['shape_slat_flow_model_1024'],
+                512, target_res,
+                coords, shape_sampler_params,
+                49152  # max_num_tokens
+            )
+
+    stage_time = time.time() - stage_start
+    yield (
+        logger.log(f"Stage 2/4: Complete ({stage_time:.1f}s)"),
+        None, None, None, None, None, None, None,
+    )
+
+    # === Stage 3: Texture Latent ===
+    yield (
+        logger.log(f"Stage 3/4: Sampling Texture Latent ({tex_steps} steps)..."),
+        None, None, None, None, None, None, None,
+    )
+
+    stage_start = time.time()
+
+    tex_cond = cond_512 if pt == '512' else cond_1024
+    tex_model = pipeline.models['tex_slat_flow_model_512'] if pt == '512' else pipeline.models['tex_slat_flow_model_1024']
+
+    with pipeline.inject_sampler_multi_image(
+        pipeline.tex_slat_sampler, num_images, tex_steps, mode.lower()
+    ):
+        tex_slat = pipeline.sample_tex_slat(
+            tex_cond, tex_model, shape_slat,
+            {
+                "steps": tex_steps,
+                "guidance_strength": tex_guidance_strength,
+                "guidance_rescale": tex_guidance_rescale,
+                "rescale_t": tex_rescale_t,
+            }
+        )
+
+    stage_time = time.time() - stage_start
+    yield (
+        logger.log(f"Stage 3/4: Complete ({stage_time:.1f}s)"),
+        None, None, None, None, None, None, None,
+    )
+
+    # === Stage 4: Decoding & Export ===
+    yield (
+        logger.log("Stage 4/4: Decoding mesh and rendering..."),
+        None, None, None, None, None, None, None,
+    )
+
+    stage_start = time.time()
+
+    torch.cuda.empty_cache()
+    mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
 
     # Simplify mesh (nvdiffrast limit)
     mesh.simplify(16777216)
 
+    decode_time = time.time() - stage_start
+    yield (
+        logger.log(f"Stage 4/4: Mesh decoded ({decode_time:.1f}s)"),
+        None, None, None, None, None, None, None,
+    )
+
     # Render preview video frames
+    yield (
+        logger.log("Stage 4/4: Rendering preview video..."),
+        None, None, None, None, None, None, None,
+    )
+
+    render_start = time.time()
     video_frames = render_utils.make_pbr_vis_frames(
         render_utils.render_video(mesh, envmap=envmap)
     )
@@ -154,7 +325,19 @@ def generate_3d(
     import imageio
     imageio.mimsave(video_path, video_frames, fps=15)
 
+    render_time = time.time() - render_start
+    yield (
+        logger.log(f"Stage 4/4: Video rendered ({render_time:.1f}s)"),
+        None, None, None, None, None, None, None,
+    )
+
     # Export GLB
+    yield (
+        logger.log("Stage 4/4: Exporting GLB..."),
+        None, None, None, None, None, None, None,
+    )
+
+    export_start = time.time()
     glb = o_voxel.postprocess.to_glb(
         vertices=mesh.vertices,
         faces=mesh.faces,
@@ -174,11 +357,64 @@ def generate_3d(
     glb_path = os.path.join(user_dir, f'model_{timestamp}.glb')
     glb.export(glb_path, extension_webp=True)
 
+    export_time = time.time() - export_start
+    yield (
+        logger.log(f"Stage 4/4: GLB exported ({export_time:.1f}s)"),
+        video_path, glb_path, glb_path,
+        None, None, None, None,
+    )
+
+    # === Quality Metrics (optional) ===
+    metrics_report = ""
+    dino_val = None
+    lpips_val = None
+    ssim_val = None
+
+    if compute_metrics:
+        yield (
+            logger.log("Computing quality metrics..."),
+            video_path, glb_path, glb_path,
+            None, None, None, None,
+        )
+
+        metrics_start = time.time()
+        try:
+            metrics = compute_quality_metrics(
+                valid_images,
+                mesh,
+                pipeline.image_cond_model,
+                render_resolution=512,
+                metric_resolution=256,
+            )
+            metrics_report = format_metrics_report(metrics)
+            dino_val = round(metrics['dino_similarity'], 3)
+            lpips_val = round(metrics['lpips'], 3)
+            ssim_val = round(metrics['ssim'], 3)
+
+            metrics_time = time.time() - metrics_start
+            yield (
+                logger.log(f"Metrics computed ({metrics_time:.1f}s)"),
+                video_path, glb_path, glb_path,
+                metrics_report, dino_val, lpips_val, ssim_val,
+            )
+        except Exception as e:
+            yield (
+                logger.log(f"Metrics failed: {str(e)}"),
+                video_path, glb_path, glb_path,
+                f"Error computing metrics: {str(e)}", None, None, None,
+            )
+
+    # Final summary
+    total_time = logger.elapsed()
+    final_log = logger.log(f"Generation complete! Total time: {total_time:.1f}s")
+
     torch.cuda.empty_cache()
 
-    # Return info string, video, glb, and download path
-    info = f"Generated with {len(valid_images)} view(s), mode={mode}, pipeline={pt}, seed={seed}"
-    return info, video_path, glb_path, glb_path
+    yield (
+        final_log,
+        video_path, glb_path, glb_path,
+        metrics_report, dino_val, lpips_val, ssim_val,
+    )
 
 
 def create_ui():
@@ -235,6 +471,13 @@ def create_ui():
                     seed = gr.Slider(0, MAX_SEED, value=42, step=1, label="Seed")
                     randomize_seed = gr.Checkbox(label="Randomize", value=False)
 
+                with gr.Row():
+                    compute_metrics = gr.Checkbox(
+                        label="Compute Quality Metrics",
+                        value=True,
+                        info="Calculate DINO/LPIPS/SSIM after generation"
+                    )
+
                 generate_btn = gr.Button("Generate 3D Model", variant="primary", size="lg")
 
                 # Advanced parameters in accordion
@@ -279,7 +522,14 @@ def create_ui():
             with gr.Column(scale=1):
                 gr.Markdown("### Output")
 
-                output_info = gr.Textbox(label="Generation Info", interactive=False)
+                # Live logs textbox
+                live_logs = gr.Textbox(
+                    label="Generation Logs",
+                    interactive=False,
+                    lines=10,
+                    max_lines=15,
+                    autoscroll=True,
+                )
 
                 with gr.Tabs():
                     with gr.Tab("Video Preview"):
@@ -293,6 +543,18 @@ def create_ui():
                         )
 
                 download_btn = gr.DownloadButton(label="Download GLB", variant="secondary")
+
+                # Quality Metrics
+                with gr.Accordion("Quality Metrics", open=True):
+                    metrics_output = gr.Textbox(
+                        label="Metrics Report",
+                        interactive=False,
+                        lines=10,
+                    )
+                    with gr.Row():
+                        dino_sim = gr.Number(label="DINO Similarity", interactive=False)
+                        lpips_val = gr.Number(label="LPIPS (lower=better)", interactive=False)
+                        ssim_val = gr.Number(label="SSIM (higher=better)", interactive=False)
 
         # Example images
         gr.Markdown("### Example: Cyborg Rat (4 views)")
@@ -338,7 +600,7 @@ def create_ui():
             ss_steps, ss_guidance_strength, ss_guidance_rescale, ss_rescale_t,
             shape_steps, shape_guidance_strength, shape_guidance_rescale, shape_rescale_t,
             tex_steps, tex_guidance_strength, tex_guidance_rescale, tex_rescale_t,
-            decimation_target, texture_size,
+            decimation_target, texture_size, compute_metrics,
             req: gr.Request,
             progress=gr.Progress(track_tqdm=True),
         ):
@@ -357,12 +619,13 @@ def create_ui():
             # Preprocess if not already done
             preprocessed = preprocess_images(pil_images)
 
-            return generate_3d(
+            # Yield from generator
+            yield from generate_3d(
                 preprocessed, mode, pipeline_type, actual_seed,
                 ss_steps, ss_guidance_strength, ss_guidance_rescale, ss_rescale_t,
                 shape_steps, shape_guidance_strength, shape_guidance_rescale, shape_rescale_t,
                 tex_steps, tex_guidance_strength, tex_guidance_rescale, tex_rescale_t,
-                decimation_target, texture_size,
+                decimation_target, texture_size, compute_metrics,
                 req, progress,
             )
 
@@ -373,9 +636,13 @@ def create_ui():
                 ss_steps, ss_guidance_strength, ss_guidance_rescale, ss_rescale_t,
                 shape_steps, shape_guidance_strength, shape_guidance_rescale, shape_rescale_t,
                 tex_steps, tex_guidance_strength, tex_guidance_rescale, tex_rescale_t,
-                decimation_target, texture_size,
+                decimation_target, texture_size, compute_metrics,
             ],
-            outputs=[output_info, video_output, model_output, download_btn],
+            outputs=[
+                live_logs,
+                video_output, model_output, download_btn,
+                metrics_output, dino_sim, lpips_val, ssim_val,
+            ],
         )
 
         return demo

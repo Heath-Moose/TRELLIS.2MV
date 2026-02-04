@@ -35,7 +35,9 @@ Step N: pred = average(denoise(x, view_0), denoise(x, view_1), ...)
 ### Files Added
 - `trellis2/pipelines/trellis2_multiview.py` - Multi-view pipeline class
 - `trellis2/pipelines/__init__.py` - Modified to register new pipeline
+- `trellis2/utils/quality_metrics.py` - Quality metrics (DINO/LPIPS/SSIM)
 - `example_multiview.py` - CLI test script
+- `app_multiview.py` - Gradio UI with live logs and quality metrics
 
 ### Usage
 ```bash
@@ -216,6 +218,37 @@ Access via: Azure ML Studio → Compute → mooseaml6 → JupyterLab
 
 ## Test Assets
 - `assets/cyborg_rat/` - 4 views (front, back, left, right) for testing
+
+---
+
+## Gradio UI Features
+
+### Live Logs
+Real-time streaming of generation progress with stage names and timing:
+```
+[14:32:01] Starting generation with 4 view(s)...
+[14:32:03] Stage 1/4: Sampling Sparse Structure (12 steps)...
+[14:32:08] Stage 1/4: Complete (5.2s)
+[14:32:10] Stage 2/4: Sampling Shape Latent (12 steps, 2-pass cascade)...
+...
+[14:32:58] Generation complete! Total time: 57.2s
+```
+
+### Quality Metrics
+Compares input images to rendered output using:
+- **DINO Similarity**: Pose-agnostic semantic similarity (0-1, higher is better)
+- **LPIPS**: Perceptual similarity (0-1, lower is better)
+- **SSIM**: Structural similarity (0-1, higher is better)
+
+Typical expected ranges:
+- DINO Similarity: 0.5-0.8
+- LPIPS: 0.2-0.5
+- SSIM: 0.5-0.8
+
+### Running the UI
+```bash
+python app_multiview.py --port 7860 --share
+```
 
 ---
 
