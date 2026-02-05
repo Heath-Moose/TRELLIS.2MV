@@ -12,8 +12,8 @@ GITHUB_REPO="https://github.com/Heath-Moose/TRELLIS.2MV.git"
 echo "=== Azure Sync ==="
 echo ""
 
-# Check for uncommitted changes
-if [[ -n $(git status -s) ]]; then
+# Check for uncommitted changes (ignore untracked files)
+if [[ -n $(git status -s | grep -v '^??') ]]; then
     echo "ERROR: Uncommitted changes detected."
     echo "Please commit your changes first:"
     echo "  git add -A && git commit -m 'your message'"
