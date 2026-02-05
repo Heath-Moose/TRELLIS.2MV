@@ -121,7 +121,7 @@ def generate_3d(
     # Metrics option
     compute_metrics: bool,
     req: gr.Request,
-    progress=gr.Progress(),
+    progress=gr.Progress(track_tqdm=True),
 ):
     """Generate 3D model from multiple view images with live logging."""
     logger = GenerationLogger()
@@ -370,6 +370,7 @@ def generate_3d(
     lpips_val = None
     ssim_val = None
 
+    print(f"DEBUG: compute_metrics = {compute_metrics}", flush=True)
     if compute_metrics:
         yield (
             logger.log("Computing quality metrics..."),
@@ -379,6 +380,7 @@ def generate_3d(
 
         metrics_start = time.time()
         try:
+            print("DEBUG: Starting quality metrics computation...", flush=True)
             metrics = compute_quality_metrics(
                 valid_images,
                 mesh,
@@ -390,6 +392,7 @@ def generate_3d(
             dino_val = round(metrics['dino_similarity'], 3)
             lpips_val = round(metrics['lpips'], 3)
             ssim_val = round(metrics['ssim'], 3)
+            print(f"DEBUG: Metrics computed: DINO={dino_val}, LPIPS={lpips_val}, SSIM={ssim_val}", flush=True)
 
             metrics_time = time.time() - metrics_start
             yield (
@@ -398,6 +401,9 @@ def generate_3d(
                 metrics_report, dino_val, lpips_val, ssim_val,
             )
         except Exception as e:
+            import traceback
+            print(f"DEBUG: Metrics computation FAILED: {str(e)}", flush=True)
+            print(f"DEBUG: Full traceback:\n{traceback.format_exc()}", flush=True)
             yield (
                 logger.log(f"Metrics failed: {str(e)}"),
                 video_path, glb_path, glb_path,
@@ -602,7 +608,7 @@ def create_ui():
             tex_steps, tex_guidance_strength, tex_guidance_rescale, tex_rescale_t,
             decimation_target, texture_size, compute_metrics,
             req: gr.Request,
-            progress=gr.Progress(),
+            progress=gr.Progress(track_tqdm=True),
         ):
             # Get seed
             actual_seed = get_seed(randomize, seed)
