@@ -293,12 +293,17 @@ def to_glb(
     
     # Create PBR material
     # Standard PBR packs Metallic and Roughness into Blue and Green channels
+    # NOTE: metallicFactor=0.0 and roughnessFactor=0.5 are used instead of 1.0
+    # to ensure the model renders correctly in basic viewers like macOS Preview
+    # that lack HDRI/environment maps. A fully metallic (1.0) rough surface
+    # appears black without reflections. The per-texel values in the texture
+    # still provide detail; these factors just scale them.
     material = trimesh.visual.material.PBRMaterial(
         baseColorTexture=Image.fromarray(np.concatenate([base_color, alpha], axis=-1)),
-        baseColorFactor=np.array([255, 255, 255, 255], dtype=np.uint8),
+        baseColorFactor=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
         metallicRoughnessTexture=Image.fromarray(np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)),
-        metallicFactor=1.0,
-        roughnessFactor=1.0,
+        metallicFactor=0.0,
+        roughnessFactor=0.5,
         alphaMode=alpha_mode,
         doubleSided=True if not remesh else False,
     )
