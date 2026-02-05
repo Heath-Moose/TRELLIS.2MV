@@ -21,6 +21,7 @@ def render_standard_views(
     mesh,
     resolution: int = 512,
     views: List[str] = None,
+    envmap=None,
 ) -> Dict[str, np.ndarray]:
     """
     Render mesh from standard viewpoints (front, right, back, left).
@@ -54,7 +55,8 @@ def render_standard_views(
     result = render_frames(
         mesh, extrinsics, intrinsics,
         options={'resolution': resolution, 'bg_color': (1, 1, 1)},
-        verbose=False
+        verbose=False,
+        envmap=envmap,
     )
 
     rendered = {}
@@ -205,6 +207,7 @@ def compute_quality_metrics(
     feature_extractor,
     render_resolution: int = 512,
     metric_resolution: int = 256,
+    envmap=None,
 ) -> Dict[str, any]:
     """
     Compute all quality metrics comparing inputs to rendered mesh.
@@ -220,7 +223,7 @@ def compute_quality_metrics(
         Dict with all metrics
     """
     # Render standard views
-    rendered = render_standard_views(mesh, render_resolution)
+    rendered = render_standard_views(mesh, render_resolution, envmap=envmap)
 
     # Compute DINO similarity
     dino_sim, dino_per_view = compute_dino_similarity(

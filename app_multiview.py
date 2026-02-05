@@ -473,6 +473,7 @@ def generate_3d(
                     pipeline.image_cond_model,
                     render_resolution=512,
                     metric_resolution=256,
+                    envmap=envmap,
                 )
                 metrics_report = format_metrics_report(metrics)
                 dino_val = round(metrics['dino_similarity'], 3)
@@ -640,6 +641,7 @@ def create_ui():
                             label="Debug/Console Output",
                             interactive=False,
                             lines=12,
+                            max_lines=20,
                             autoscroll=True,
                         )
 
