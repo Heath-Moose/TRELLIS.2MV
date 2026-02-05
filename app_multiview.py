@@ -186,7 +186,6 @@ def generate_3d(
                 "guidance_strength": ss_guidance_strength,
                 "guidance_rescale": ss_guidance_rescale,
                 "rescale_t": ss_rescale_t,
-                "verbose": False,
             }
         )
 
@@ -214,7 +213,6 @@ def generate_3d(
         "guidance_strength": shape_guidance_strength,
         "guidance_rescale": shape_guidance_rescale,
         "rescale_t": shape_rescale_t,
-        "verbose": False,
     }
 
     if pt == '512':
@@ -279,7 +277,6 @@ def generate_3d(
                 "guidance_strength": tex_guidance_strength,
                 "guidance_rescale": tex_guidance_rescale,
                 "rescale_t": tex_rescale_t,
-                "verbose": False,
             }
         )
 
