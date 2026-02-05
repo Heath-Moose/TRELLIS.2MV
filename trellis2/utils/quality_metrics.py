@@ -111,6 +111,10 @@ def compute_dino_similarity(
     old_size = getattr(feature_extractor, 'image_size', 512)
     feature_extractor.image_size = resolution
 
+    # Ensure feature extractor is on CUDA
+    if hasattr(feature_extractor, 'cuda'):
+        feature_extractor.cuda()
+
     # Extract features for input images
     with torch.no_grad():
         input_features = feature_extractor(input_images)  # (N, patches, dim)

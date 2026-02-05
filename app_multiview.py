@@ -518,8 +518,26 @@ def generate_3d(
         console.stop()
 
 
+# CSS to force scrollbars on textareas (Gradio hides them by default)
+CUSTOM_CSS = """
+textarea[rows]:not([rows="1"]) {
+    overflow-y: auto !important;
+    scrollbar-width: thin !important;
+    max-height: 300px !important;
+}
+textarea[rows]:not([rows="1"])::-webkit-scrollbar {
+    width: 8px !important;
+    background: #f1f1f1 !important;
+}
+textarea[rows]:not([rows="1"])::-webkit-scrollbar-thumb {
+    background: #a8a8a8 !important;
+    border-radius: 4px !important;
+}
+"""
+
+
 def create_ui():
-    with gr.Blocks(title="TRELLIS.2 Multi-View") as demo:
+    with gr.Blocks(title="TRELLIS.2 Multi-View", css=CUSTOM_CSS) as demo:
         gr.Markdown("""
         # TRELLIS.2 Multi-View 3D Generation
 
@@ -671,11 +689,11 @@ def create_ui():
                         ssim_val = gr.Number(label="SSIM (higher=better)", interactive=False)
 
         # Example images
-        gr.Markdown("### Example: Cyborg Rat (4 views)")
-        gr.Markdown("Load example images from `assets/cyborg_rat/` folder")
+        gr.Markdown("### Example: Nano Banana Pro (4 views)")
+        gr.Markdown("Load example images from `assets/cyborg_rat_HD/` folder")
 
         def load_example():
-            example_dir = "assets/cyborg_rat"
+            example_dir = "assets/cyborg_rat_HD"
             if os.path.exists(example_dir):
                 images = []
                 for fname in sorted(os.listdir(example_dir)):
@@ -684,7 +702,7 @@ def create_ui():
                 return images
             return []
 
-        load_example_btn = gr.Button("Load Cyborg Rat Example")
+        load_example_btn = gr.Button("Load Nano Banana Pro Example")
         load_example_btn.click(load_example, outputs=[image_input])
 
         # Event handlers
