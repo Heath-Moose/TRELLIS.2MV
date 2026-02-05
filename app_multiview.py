@@ -537,7 +537,7 @@ textarea[rows]:not([rows="1"])::-webkit-scrollbar-thumb {
 
 
 def create_ui():
-    with gr.Blocks(title="TRELLIS.2 Multi-View", css=CUSTOM_CSS) as demo:
+    with gr.Blocks(title="TRELLIS.2 Multi-View") as demo:
         gr.Markdown("""
         # TRELLIS.2 Multi-View 3D Generation
 
@@ -823,6 +823,7 @@ if __name__ == "__main__":
         server_name=args.server_name,
         server_port=args.port,
         share=args.share,
+        css=CUSTOM_CSS,
         # Azure ML specific settings
         root_path=os.environ.get("GRADIO_ROOT_PATH", ""),
     )
