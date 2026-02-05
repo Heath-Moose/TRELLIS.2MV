@@ -48,7 +48,7 @@ def render_standard_views(
     pitchs = [0.25] * len(views)  # Slight elevation
 
     extrinsics, intrinsics = yaw_pitch_r_fov_to_extrinsics_intrinsics(
-        yaws, pitchs, r=2, fov=40
+        yaws, pitchs, 2, 40
     )
 
     result = render_frames(
