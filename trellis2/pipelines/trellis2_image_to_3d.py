@@ -209,12 +209,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
         if self.low_vram:
             flow_model.to(self.device)
+        _verbose = sampler_params.pop('verbose', True)
         z_s = self.sparse_structure_sampler.sample(
             flow_model,
             noise,
             **cond,
             **sampler_params,
-            verbose=True,
+            verbose=_verbose,
             tqdm_desc="Sampling sparse structure",
         ).samples
         if self.low_vram:
@@ -243,7 +244,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
     ) -> SparseTensor:
         """
         Sample structured latent with the given conditioning.
-        
+
         Args:
             cond (dict): The conditioning information.
             coords (torch.Tensor): The coordinates of the sparse structure.
@@ -255,6 +256,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             coords=coords,
         )
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
+        _verbose = sampler_params.pop('verbose', True)
         if self.low_vram:
             flow_model.to(self.device)
         slat = self.shape_slat_sampler.sample(
@@ -262,7 +264,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             noise,
             **cond,
             **sampler_params,
-            verbose=True,
+            verbose=_verbose,
             tqdm_desc="Sampling shape SLat",
         ).samples
         if self.low_vram:
@@ -271,9 +273,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat
-    
+
     def sample_shape_slat_cascade(
         self,
         lr_cond: dict,
@@ -299,7 +301,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             feats=torch.randn(coords.shape[0], flow_model_lr.in_channels).to(self.device),
             coords=coords,
         )
+        _verbose = sampler_params.get('verbose', True)
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
+        sampler_params.pop('verbose', None)
         if self.low_vram:
             flow_model_lr.to(self.device)
         slat = self.shape_slat_sampler.sample(
@@ -307,7 +311,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             noise,
             **lr_cond,
             **sampler_params,
-            verbose=True,
+            verbose=_verbose,
             tqdm_desc="Sampling shape SLat",
         ).samples
         if self.low_vram:
@@ -344,6 +348,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             coords=coords,
         )
         sampler_params = {**self.shape_slat_sampler_params, **sampler_params}
+        sampler_params.pop('verbose', None)
         if self.low_vram:
             flow_model.to(self.device)
         slat = self.shape_slat_sampler.sample(
@@ -351,7 +356,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             noise,
             **cond,
             **sampler_params,
-            verbose=True,
+            verbose=_verbose,
             tqdm_desc="Sampling shape SLat",
         ).samples
         if self.low_vram:
@@ -360,7 +365,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         std = torch.tensor(self.shape_slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.shape_slat_normalization['mean'])[None].to(slat.device)
         slat = slat * std + mean
-        
+
         return slat, hr_resolution
 
     def decode_shape_slat(
@@ -410,7 +415,9 @@ class Trellis2ImageTo3DPipeline(Pipeline):
 
         in_channels = flow_model.in_channels if isinstance(flow_model, nn.Module) else flow_model[0].in_channels
         noise = shape_slat.replace(feats=torch.randn(shape_slat.coords.shape[0], in_channels - shape_slat.feats.shape[1]).to(self.device))
+        _verbose = sampler_params.get('verbose', True)
         sampler_params = {**self.tex_slat_sampler_params, **sampler_params}
+        sampler_params.pop('verbose', None)
         if self.low_vram:
             flow_model.to(self.device)
         slat = self.tex_slat_sampler.sample(
@@ -419,7 +426,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
             concat_cond=shape_slat,
             **cond,
             **sampler_params,
-            verbose=True,
+            verbose=_verbose,
             tqdm_desc="Sampling texture SLat",
         ).samples
         if self.low_vram:
