@@ -35,19 +35,12 @@ TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp_multivie
 MAX_IMAGES = 8  # Maximum number of input views supported
 
 
-def make_progress_html(percent: int, status: str) -> str:
-    """Generate HTML for progress bar with status text."""
-    return f'''
-    <div style="margin: 10px 0;">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
-            <span style="font-weight: 500;">{status}</span>
-            <span>{percent}%</span>
-        </div>
-        <div style="background: #e0e0e0; border-radius: 4px; height: 20px; overflow: hidden;">
-            <div style="background: linear-gradient(90deg, #f97316, #fb923c); height: 100%; width: {percent}%; transition: width 0.3s ease;"></div>
-        </div>
-    </div>
-    '''
+def make_progress_bar(percent: int, status: str) -> str:
+    """Generate Markdown progress indicator (better streaming support than HTML)."""
+    filled = int(percent / 5)  # 20 chars total
+    empty = 20 - filled
+    bar = "█" * filled + "░" * empty
+    return f"**{status}**\n\n`[{bar}]` {percent}%"
 
 
 class ConsoleCapture:
@@ -216,20 +209,22 @@ def generate_3d(
 
     try:
         # Yield: Starting
+        # Outputs: logs, progress, console, video, model, metrics_report, dino, lpips, ssim (9 values)
+        # Note: download_btn is updated separately via .then() to avoid Gradio 6 streaming issues
         yield (
             logger.log(f"Starting generation with {len(valid_images)} view(s)..."),
-            make_progress_html(0, "Initializing..."),  # progress_bar
-            console.get_output(),  # console_output
-            None, None, None,  # video, model, download
+            make_progress_bar(0, "Initializing..."),
+            console.get_output(),
+            None, None,  # video, model
             None, None, None, None,  # metrics report, dino, lpips, ssim
         )
 
         # === Stage 1: Sparse Structure ===
         yield (
             logger.log(f"Stage 1/4: Sampling Sparse Structure ({ss_steps} steps)..."),
-            make_progress_html(5, "Stage 1/4: Sparse Structure..."),
+            make_progress_bar(5, "Stage 1/4: Sparse Structure..."),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         stage_start = time.time()
@@ -259,9 +254,9 @@ def generate_3d(
         stage_time = time.time() - stage_start
         yield (
             logger.log(f"Stage 1/4: Complete ({stage_time:.1f}s)"),
-            make_progress_html(25, "Stage 1/4: Complete ✓"),
+            make_progress_bar(25, "Stage 1/4: Complete ✓"),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         # === Stage 2: Shape Latent ===
@@ -272,9 +267,9 @@ def generate_3d(
 
         yield (
             logger.log(stage_desc),
-            make_progress_html(25, "Stage 2/4: Shape Latent..."),
+            make_progress_bar(25, "Stage 2/4: Shape Latent..."),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         stage_start = time.time()
@@ -324,17 +319,17 @@ def generate_3d(
         stage_time = time.time() - stage_start
         yield (
             logger.log(f"Stage 2/4: Complete ({stage_time:.1f}s)"),
-            make_progress_html(50, "Stage 2/4: Complete ✓"),
+            make_progress_bar(50, "Stage 2/4: Complete ✓"),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         # === Stage 3: Texture Latent ===
         yield (
             logger.log(f"Stage 3/4: Sampling Texture Latent ({tex_steps} steps)..."),
-            make_progress_html(50, "Stage 3/4: Texture Latent..."),
+            make_progress_bar(50, "Stage 3/4: Texture Latent..."),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         stage_start = time.time()
@@ -358,17 +353,17 @@ def generate_3d(
         stage_time = time.time() - stage_start
         yield (
             logger.log(f"Stage 3/4: Complete ({stage_time:.1f}s)"),
-            make_progress_html(75, "Stage 3/4: Complete ✓"),
+            make_progress_bar(75, "Stage 3/4: Complete ✓"),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         # === Stage 4: Decoding & Export ===
         yield (
             logger.log("Stage 4/4: Decoding mesh and rendering..."),
-            make_progress_html(75, "Stage 4/4: Decoding..."),
+            make_progress_bar(75, "Stage 4/4: Decoding..."),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         stage_start = time.time()
@@ -382,17 +377,17 @@ def generate_3d(
         decode_time = time.time() - stage_start
         yield (
             logger.log(f"Stage 4/4: Mesh decoded ({decode_time:.1f}s)"),
-            make_progress_html(80, "Stage 4/4: Mesh decoded ✓"),
+            make_progress_bar(80, "Stage 4/4: Mesh decoded ✓"),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         # Render preview video frames
         yield (
             logger.log("Stage 4/4: Rendering preview video..."),
-            make_progress_html(80, "Stage 4/4: Rendering video..."),
+            make_progress_bar(80, "Stage 4/4: Rendering video..."),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         render_start = time.time()
@@ -411,17 +406,17 @@ def generate_3d(
         render_time = time.time() - render_start
         yield (
             logger.log(f"Stage 4/4: Video rendered ({render_time:.1f}s)"),
-            make_progress_html(85, "Stage 4/4: Video rendered ✓"),
+            make_progress_bar(85, "Stage 4/4: Video rendered ✓"),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         # Export GLB
         yield (
             logger.log("Stage 4/4: Exporting GLB..."),
-            make_progress_html(85, "Stage 4/4: Exporting GLB..."),
+            make_progress_bar(85, "Stage 4/4: Exporting GLB..."),
             console.get_output(),
-            None, None, None, None, None, None, None,
+            None, None, None, None, None, None,
         )
 
         export_start = time.time()
@@ -447,9 +442,9 @@ def generate_3d(
         export_time = time.time() - export_start
         yield (
             logger.log(f"Stage 4/4: GLB exported ({export_time:.1f}s)"),
-            make_progress_html(90, "Stage 4/4: GLB exported ✓"),
+            make_progress_bar(90, "Stage 4/4: GLB exported ✓"),
             console.get_output(),
-            video_path, glb_path, glb_path,
+            video_path, glb_path,
             None, None, None, None,
         )
 
@@ -463,9 +458,9 @@ def generate_3d(
         if compute_metrics:
             yield (
                 logger.log("Computing quality metrics..."),
-                make_progress_html(95, "Computing quality metrics..."),
+                make_progress_bar(95, "Computing quality metrics..."),
                 console.get_output(),
-                video_path, glb_path, glb_path,
+                video_path, glb_path,
                 None, None, None, None,
             )
 
@@ -488,9 +483,9 @@ def generate_3d(
                 metrics_time = time.time() - metrics_start
                 yield (
                     logger.log(f"Metrics computed ({metrics_time:.1f}s)"),
-                    make_progress_html(100, "Metrics computed ✓"),
+                    make_progress_bar(100, "Metrics computed ✓"),
                     console.get_output(),
-                    video_path, glb_path, glb_path,
+                    video_path, glb_path,
                     metrics_report, dino_val, lpips_val, ssim_val,
                 )
             except Exception as e:
@@ -499,9 +494,9 @@ def generate_3d(
                 print(f"DEBUG: Full traceback:\n{traceback.format_exc()}", flush=True)
                 yield (
                     logger.log(f"Metrics failed: {str(e)}"),
-                    make_progress_html(100, "Metrics failed"),
+                    make_progress_bar(100, "Metrics failed"),
                     console.get_output(),
-                    video_path, glb_path, glb_path,
+                    video_path, glb_path,
                     f"Error computing metrics: {str(e)}", None, None, None,
                 )
 
@@ -513,9 +508,9 @@ def generate_3d(
 
         yield (
             final_log,
-            make_progress_html(100, f"Complete! ({total_time:.1f}s)"),
+            make_progress_bar(100, f"Complete! ({total_time:.1f}s)"),
             console.get_output(),
-            video_path, glb_path, glb_path,
+            video_path, glb_path,
             metrics_report, dino_val, lpips_val, ssim_val,
         )
     finally:
@@ -637,8 +632,8 @@ def create_ui():
                             max_lines=15,
                             autoscroll=True,
                         )
-                        progress_bar = gr.HTML(
-                            value=make_progress_html(0, "Ready"),
+                        progress_bar = gr.Markdown(
+                            value=make_progress_bar(0, "Ready"),
                         )
                     with gr.Tab("Console Output"):
                         console_output = gr.Textbox(
@@ -746,6 +741,10 @@ def create_ui():
                 req, progress,
             )
 
+        # Helper to update download button from model path
+        def update_download_btn(model_path):
+            return model_path
+
         generate_btn.click(
             prepare_and_generate,
             inputs=[
@@ -759,9 +758,14 @@ def create_ui():
                 live_logs,
                 progress_bar,
                 console_output,
-                video_output, model_output, download_btn,
+                video_output, model_output,
                 metrics_output, dino_sim, lpips_val, ssim_val,
             ],
+        ).then(
+            # Update download button after generation completes (avoids Gradio 6 streaming issues)
+            update_download_btn,
+            inputs=[model_output],
+            outputs=[download_btn],
         )
 
         return demo
