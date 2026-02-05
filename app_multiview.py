@@ -121,7 +121,7 @@ def generate_3d(
     # Metrics option
     compute_metrics: bool,
     req: gr.Request,
-    progress=gr.Progress(track_tqdm=True),
+    progress=gr.Progress(),
 ):
     """Generate 3D model from multiple view images with live logging."""
     logger = GenerationLogger()
@@ -602,7 +602,7 @@ def create_ui():
             tex_steps, tex_guidance_strength, tex_guidance_rescale, tex_rescale_t,
             decimation_target, texture_size, compute_metrics,
             req: gr.Request,
-            progress=gr.Progress(track_tqdm=True),
+            progress=gr.Progress(),
         ):
             # Get seed
             actual_seed = get_seed(randomize, seed)
