@@ -9,12 +9,15 @@ import os
 os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import sys
 import gradio as gr
 from datetime import datetime
 import shutil
 import cv2
 import time
 from typing import *
+import threading
+from io import StringIO
 import torch
 import numpy as np
 from PIL import Image
@@ -30,6 +33,48 @@ import o_voxel
 MAX_SEED = np.iinfo(np.int32).max
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tmp_multiview')
 MAX_IMAGES = 8  # Maximum number of input views supported
+
+
+class ConsoleCapture:
+    """Thread-safe stdout/stderr capture for Gradio."""
+
+    def __init__(self):
+        self.buffer = StringIO()
+        self._lock = threading.Lock()
+        self._original_stdout = None
+        self._original_stderr = None
+
+    def start(self):
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        sys.stdout = self
+        sys.stderr = self
+
+    def stop(self):
+        if self._original_stdout:
+            sys.stdout = self._original_stdout
+            sys.stderr = self._original_stderr
+            self._original_stdout = None
+            self._original_stderr = None
+
+    def write(self, text):
+        with self._lock:
+            self.buffer.write(text)
+        # Also write to original stdout
+        if self._original_stdout:
+            self._original_stdout.write(text)
+
+    def flush(self):
+        if self._original_stdout:
+            self._original_stdout.flush()
+
+    def get_output(self):
+        with self._lock:
+            return self.buffer.getvalue()
+
+    def clear(self):
+        with self._lock:
+            self.buffer = StringIO()
 
 
 class GenerationLogger:
@@ -121,11 +166,13 @@ def generate_3d(
     # Metrics option
     compute_metrics: bool,
     req: gr.Request,
-    progress=gr.Progress(track_tqdm=True),
+    progress=gr.Progress(),
 ):
     """Generate 3D model from multiple view images with live logging."""
     logger = GenerationLogger()
     logger.reset()
+    console = ConsoleCapture()
+    console.start()
 
     # Filter out None images
     valid_images = [img for img in images if img is not None]
@@ -152,275 +199,312 @@ def generate_3d(
     is_cascade = 'cascade' in pt
     shape_passes = 2 if is_cascade else 1
 
-    # Yield: Starting
-    yield (
-        logger.log(f"Starting generation with {len(valid_images)} view(s)..."),
-        None, None, None,  # video, model, download
-        None, None, None, None,  # metrics report, dino, lpips, ssim
-    )
-
-    # === Stage 1: Sparse Structure ===
-    yield (
-        logger.log(f"Stage 1/4: Sampling Sparse Structure ({ss_steps} steps)..."),
-        None, None, None, None, None, None, None,
-    )
-
-    stage_start = time.time()
-
-    # Get conditioning
-    cond_512 = pipeline.get_cond_multi(valid_images, 512)
-    cond_1024 = pipeline.get_cond_multi(valid_images, 1024) if pt != '512' else None
-
-    torch.manual_seed(seed)
-    num_images = len(valid_images)
-
-    ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pt]
-
-    with pipeline.inject_sampler_multi_image(
-        pipeline.sparse_structure_sampler, num_images, ss_steps, mode.lower()
-    ):
-        coords = pipeline.sample_sparse_structure(
-            cond_512, ss_res, 1,
-            {
-                "steps": ss_steps,
-                "guidance_strength": ss_guidance_strength,
-                "guidance_rescale": ss_guidance_rescale,
-                "rescale_t": ss_rescale_t,
-            }
-        )
-
-    stage_time = time.time() - stage_start
-    yield (
-        logger.log(f"Stage 1/4: Complete ({stage_time:.1f}s)"),
-        None, None, None, None, None, None, None,
-    )
-
-    # === Stage 2: Shape Latent ===
-    stage_desc = f"Stage 2/4: Sampling Shape Latent ({shape_steps} steps"
-    if is_cascade:
-        stage_desc += ", 2-pass cascade"
-    stage_desc += ")..."
-
-    yield (
-        logger.log(stage_desc),
-        None, None, None, None, None, None, None,
-    )
-
-    stage_start = time.time()
-
-    shape_sampler_params = {
-        "steps": shape_steps,
-        "guidance_strength": shape_guidance_strength,
-        "guidance_rescale": shape_guidance_rescale,
-        "rescale_t": shape_rescale_t,
-    }
-
-    if pt == '512':
-        with pipeline.inject_sampler_multi_image(
-            pipeline.shape_slat_sampler, num_images, shape_steps, mode.lower()
-        ):
-            shape_slat = pipeline.sample_shape_slat(
-                cond_512, pipeline.models['shape_slat_flow_model_512'],
-                coords, shape_sampler_params
-            )
-        res = 512
-
-    elif pt == '1024':
-        with pipeline.inject_sampler_multi_image(
-            pipeline.shape_slat_sampler, num_images, shape_steps, mode.lower()
-        ):
-            shape_slat = pipeline.sample_shape_slat(
-                cond_1024, pipeline.models['shape_slat_flow_model_1024'],
-                coords, shape_sampler_params
-            )
-        res = 1024
-
-    elif pt in ['1024_cascade', '1536_cascade']:
-        target_res = 1024 if pt == '1024_cascade' else 1536
-
-        with pipeline.inject_sampler_multi_image(
-            pipeline.shape_slat_sampler, num_images, shape_steps * 2, mode.lower()
-        ):
-            shape_slat, res = pipeline.sample_shape_slat_cascade(
-                cond_512, cond_1024,
-                pipeline.models['shape_slat_flow_model_512'],
-                pipeline.models['shape_slat_flow_model_1024'],
-                512, target_res,
-                coords, shape_sampler_params,
-                49152  # max_num_tokens
-            )
-
-    stage_time = time.time() - stage_start
-    yield (
-        logger.log(f"Stage 2/4: Complete ({stage_time:.1f}s)"),
-        None, None, None, None, None, None, None,
-    )
-
-    # === Stage 3: Texture Latent ===
-    yield (
-        logger.log(f"Stage 3/4: Sampling Texture Latent ({tex_steps} steps)..."),
-        None, None, None, None, None, None, None,
-    )
-
-    stage_start = time.time()
-
-    tex_cond = cond_512 if pt == '512' else cond_1024
-    tex_model = pipeline.models['tex_slat_flow_model_512'] if pt == '512' else pipeline.models['tex_slat_flow_model_1024']
-
-    with pipeline.inject_sampler_multi_image(
-        pipeline.tex_slat_sampler, num_images, tex_steps, mode.lower()
-    ):
-        tex_slat = pipeline.sample_tex_slat(
-            tex_cond, tex_model, shape_slat,
-            {
-                "steps": tex_steps,
-                "guidance_strength": tex_guidance_strength,
-                "guidance_rescale": tex_guidance_rescale,
-                "rescale_t": tex_rescale_t,
-            }
-        )
-
-    stage_time = time.time() - stage_start
-    yield (
-        logger.log(f"Stage 3/4: Complete ({stage_time:.1f}s)"),
-        None, None, None, None, None, None, None,
-    )
-
-    # === Stage 4: Decoding & Export ===
-    yield (
-        logger.log("Stage 4/4: Decoding mesh and rendering..."),
-        None, None, None, None, None, None, None,
-    )
-
-    stage_start = time.time()
-
-    torch.cuda.empty_cache()
-    mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
-
-    # Simplify mesh (nvdiffrast limit)
-    mesh.simplify(16777216)
-
-    decode_time = time.time() - stage_start
-    yield (
-        logger.log(f"Stage 4/4: Mesh decoded ({decode_time:.1f}s)"),
-        None, None, None, None, None, None, None,
-    )
-
-    # Render preview video frames
-    yield (
-        logger.log("Stage 4/4: Rendering preview video..."),
-        None, None, None, None, None, None, None,
-    )
-
-    render_start = time.time()
-    video_frames = render_utils.make_pbr_vis_frames(
-        render_utils.render_video(mesh, envmap=envmap)
-    )
-
-    # Save preview video
-    now = datetime.now()
-    timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
-    video_path = os.path.join(user_dir, f'preview_{timestamp}.mp4')
-
-    import imageio
-    imageio.mimsave(video_path, video_frames, fps=15)
-
-    render_time = time.time() - render_start
-    yield (
-        logger.log(f"Stage 4/4: Video rendered ({render_time:.1f}s)"),
-        None, None, None, None, None, None, None,
-    )
-
-    # Export GLB
-    yield (
-        logger.log("Stage 4/4: Exporting GLB..."),
-        None, None, None, None, None, None, None,
-    )
-
-    export_start = time.time()
-    glb = o_voxel.postprocess.to_glb(
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        attr_volume=mesh.attrs,
-        coords=mesh.coords,
-        attr_layout=mesh.layout,
-        voxel_size=mesh.voxel_size,
-        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=decimation_target,
-        texture_size=texture_size,
-        remesh=True,
-        remesh_band=1,
-        remesh_project=0,
-        verbose=True,
-    )
-
-    glb_path = os.path.join(user_dir, f'model_{timestamp}.glb')
-    glb.export(glb_path, extension_webp=True)
-
-    export_time = time.time() - export_start
-    yield (
-        logger.log(f"Stage 4/4: GLB exported ({export_time:.1f}s)"),
-        video_path, glb_path, glb_path,
-        None, None, None, None,
-    )
-
-    # === Quality Metrics (optional) ===
-    metrics_report = ""
-    dino_val = None
-    lpips_val = None
-    ssim_val = None
-
-    print(f"DEBUG: compute_metrics = {compute_metrics}", flush=True)
-    if compute_metrics:
+    try:
+        # Yield: Starting
         yield (
-            logger.log("Computing quality metrics..."),
+            logger.log(f"Starting generation with {len(valid_images)} view(s)..."),
+            "Initializing...",  # progress_status
+            console.get_output(),  # console_output
+            None, None, None,  # video, model, download
+            None, None, None, None,  # metrics report, dino, lpips, ssim
+        )
+
+        # === Stage 1: Sparse Structure ===
+        yield (
+            logger.log(f"Stage 1/4: Sampling Sparse Structure ({ss_steps} steps)..."),
+            "Stage 1/4: Sparse Structure...",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        stage_start = time.time()
+
+        # Get conditioning
+        cond_512 = pipeline.get_cond_multi(valid_images, 512)
+        cond_1024 = pipeline.get_cond_multi(valid_images, 1024) if pt != '512' else None
+
+        torch.manual_seed(seed)
+        num_images = len(valid_images)
+
+        ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pt]
+
+        with pipeline.inject_sampler_multi_image(
+            pipeline.sparse_structure_sampler, num_images, ss_steps, mode.lower()
+        ):
+            coords = pipeline.sample_sparse_structure(
+                cond_512, ss_res, 1,
+                {
+                    "steps": ss_steps,
+                    "guidance_strength": ss_guidance_strength,
+                    "guidance_rescale": ss_guidance_rescale,
+                    "rescale_t": ss_rescale_t,
+                }
+            )
+
+        stage_time = time.time() - stage_start
+        yield (
+            logger.log(f"Stage 1/4: Complete ({stage_time:.1f}s)"),
+            "Stage 1/4: Complete ✓",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        # === Stage 2: Shape Latent ===
+        stage_desc = f"Stage 2/4: Sampling Shape Latent ({shape_steps} steps"
+        if is_cascade:
+            stage_desc += ", 2-pass cascade"
+        stage_desc += ")..."
+
+        yield (
+            logger.log(stage_desc),
+            "Stage 2/4: Shape Latent...",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        stage_start = time.time()
+
+        shape_sampler_params = {
+            "steps": shape_steps,
+            "guidance_strength": shape_guidance_strength,
+            "guidance_rescale": shape_guidance_rescale,
+            "rescale_t": shape_rescale_t,
+        }
+
+        if pt == '512':
+            with pipeline.inject_sampler_multi_image(
+                pipeline.shape_slat_sampler, num_images, shape_steps, mode.lower()
+            ):
+                shape_slat = pipeline.sample_shape_slat(
+                    cond_512, pipeline.models['shape_slat_flow_model_512'],
+                    coords, shape_sampler_params
+                )
+            res = 512
+
+        elif pt == '1024':
+            with pipeline.inject_sampler_multi_image(
+                pipeline.shape_slat_sampler, num_images, shape_steps, mode.lower()
+            ):
+                shape_slat = pipeline.sample_shape_slat(
+                    cond_1024, pipeline.models['shape_slat_flow_model_1024'],
+                    coords, shape_sampler_params
+                )
+            res = 1024
+
+        elif pt in ['1024_cascade', '1536_cascade']:
+            target_res = 1024 if pt == '1024_cascade' else 1536
+
+            with pipeline.inject_sampler_multi_image(
+                pipeline.shape_slat_sampler, num_images, shape_steps * 2, mode.lower()
+            ):
+                shape_slat, res = pipeline.sample_shape_slat_cascade(
+                    cond_512, cond_1024,
+                    pipeline.models['shape_slat_flow_model_512'],
+                    pipeline.models['shape_slat_flow_model_1024'],
+                    512, target_res,
+                    coords, shape_sampler_params,
+                    49152  # max_num_tokens
+                )
+
+        stage_time = time.time() - stage_start
+        yield (
+            logger.log(f"Stage 2/4: Complete ({stage_time:.1f}s)"),
+            "Stage 2/4: Complete ✓",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        # === Stage 3: Texture Latent ===
+        yield (
+            logger.log(f"Stage 3/4: Sampling Texture Latent ({tex_steps} steps)..."),
+            "Stage 3/4: Texture Latent...",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        stage_start = time.time()
+
+        tex_cond = cond_512 if pt == '512' else cond_1024
+        tex_model = pipeline.models['tex_slat_flow_model_512'] if pt == '512' else pipeline.models['tex_slat_flow_model_1024']
+
+        with pipeline.inject_sampler_multi_image(
+            pipeline.tex_slat_sampler, num_images, tex_steps, mode.lower()
+        ):
+            tex_slat = pipeline.sample_tex_slat(
+                tex_cond, tex_model, shape_slat,
+                {
+                    "steps": tex_steps,
+                    "guidance_strength": tex_guidance_strength,
+                    "guidance_rescale": tex_guidance_rescale,
+                    "rescale_t": tex_rescale_t,
+                }
+            )
+
+        stage_time = time.time() - stage_start
+        yield (
+            logger.log(f"Stage 3/4: Complete ({stage_time:.1f}s)"),
+            "Stage 3/4: Complete ✓",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        # === Stage 4: Decoding & Export ===
+        yield (
+            logger.log("Stage 4/4: Decoding mesh and rendering..."),
+            "Stage 4/4: Decoding...",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        stage_start = time.time()
+
+        torch.cuda.empty_cache()
+        mesh = pipeline.decode_latent(shape_slat, tex_slat, res)[0]
+
+        # Simplify mesh (nvdiffrast limit)
+        mesh.simplify(16777216)
+
+        decode_time = time.time() - stage_start
+        yield (
+            logger.log(f"Stage 4/4: Mesh decoded ({decode_time:.1f}s)"),
+            "Stage 4/4: Mesh decoded ✓",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        # Render preview video frames
+        yield (
+            logger.log("Stage 4/4: Rendering preview video..."),
+            "Stage 4/4: Rendering video...",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        render_start = time.time()
+        video_frames = render_utils.make_pbr_vis_frames(
+            render_utils.render_video(mesh, envmap=envmap)
+        )
+
+        # Save preview video
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%dT%H%M%S") + f".{now.microsecond // 1000:03d}"
+        video_path = os.path.join(user_dir, f'preview_{timestamp}.mp4')
+
+        import imageio
+        imageio.mimsave(video_path, video_frames, fps=15)
+
+        render_time = time.time() - render_start
+        yield (
+            logger.log(f"Stage 4/4: Video rendered ({render_time:.1f}s)"),
+            "Stage 4/4: Video rendered ✓",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        # Export GLB
+        yield (
+            logger.log("Stage 4/4: Exporting GLB..."),
+            "Stage 4/4: Exporting GLB...",
+            console.get_output(),
+            None, None, None, None, None, None, None,
+        )
+
+        export_start = time.time()
+        glb = o_voxel.postprocess.to_glb(
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            attr_volume=mesh.attrs,
+            coords=mesh.coords,
+            attr_layout=mesh.layout,
+            voxel_size=mesh.voxel_size,
+            aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            decimation_target=decimation_target,
+            texture_size=texture_size,
+            remesh=True,
+            remesh_band=1,
+            remesh_project=0,
+            verbose=True,
+        )
+
+        glb_path = os.path.join(user_dir, f'model_{timestamp}.glb')
+        glb.export(glb_path, extension_webp=True)
+
+        export_time = time.time() - export_start
+        yield (
+            logger.log(f"Stage 4/4: GLB exported ({export_time:.1f}s)"),
+            "Stage 4/4: GLB exported ✓",
+            console.get_output(),
             video_path, glb_path, glb_path,
             None, None, None, None,
         )
 
-        metrics_start = time.time()
-        try:
-            print("DEBUG: Starting quality metrics computation...", flush=True)
-            metrics = compute_quality_metrics(
-                valid_images,
-                mesh,
-                pipeline.image_cond_model,
-                render_resolution=512,
-                metric_resolution=256,
-            )
-            metrics_report = format_metrics_report(metrics)
-            dino_val = round(metrics['dino_similarity'], 3)
-            lpips_val = round(metrics['lpips'], 3)
-            ssim_val = round(metrics['ssim'], 3)
-            print(f"DEBUG: Metrics computed: DINO={dino_val}, LPIPS={lpips_val}, SSIM={ssim_val}", flush=True)
+        # === Quality Metrics (optional) ===
+        metrics_report = ""
+        dino_val = None
+        lpips_val = None
+        ssim_val = None
 
-            metrics_time = time.time() - metrics_start
+        print(f"DEBUG: compute_metrics = {compute_metrics}", flush=True)
+        if compute_metrics:
             yield (
-                logger.log(f"Metrics computed ({metrics_time:.1f}s)"),
+                logger.log("Computing quality metrics..."),
+                "Computing quality metrics...",
+                console.get_output(),
                 video_path, glb_path, glb_path,
-                metrics_report, dino_val, lpips_val, ssim_val,
-            )
-        except Exception as e:
-            import traceback
-            print(f"DEBUG: Metrics computation FAILED: {str(e)}", flush=True)
-            print(f"DEBUG: Full traceback:\n{traceback.format_exc()}", flush=True)
-            yield (
-                logger.log(f"Metrics failed: {str(e)}"),
-                video_path, glb_path, glb_path,
-                f"Error computing metrics: {str(e)}", None, None, None,
+                None, None, None, None,
             )
 
-    # Final summary
-    total_time = logger.elapsed()
-    final_log = logger.log(f"Generation complete! Total time: {total_time:.1f}s")
+            metrics_start = time.time()
+            try:
+                print("DEBUG: Starting quality metrics computation...", flush=True)
+                metrics = compute_quality_metrics(
+                    valid_images,
+                    mesh,
+                    pipeline.image_cond_model,
+                    render_resolution=512,
+                    metric_resolution=256,
+                )
+                metrics_report = format_metrics_report(metrics)
+                dino_val = round(metrics['dino_similarity'], 3)
+                lpips_val = round(metrics['lpips'], 3)
+                ssim_val = round(metrics['ssim'], 3)
+                print(f"DEBUG: Metrics computed: DINO={dino_val}, LPIPS={lpips_val}, SSIM={ssim_val}", flush=True)
 
-    torch.cuda.empty_cache()
+                metrics_time = time.time() - metrics_start
+                yield (
+                    logger.log(f"Metrics computed ({metrics_time:.1f}s)"),
+                    "Metrics computed ✓",
+                    console.get_output(),
+                    video_path, glb_path, glb_path,
+                    metrics_report, dino_val, lpips_val, ssim_val,
+                )
+            except Exception as e:
+                import traceback
+                print(f"DEBUG: Metrics computation FAILED: {str(e)}", flush=True)
+                print(f"DEBUG: Full traceback:\n{traceback.format_exc()}", flush=True)
+                yield (
+                    logger.log(f"Metrics failed: {str(e)}"),
+                    "Metrics failed",
+                    console.get_output(),
+                    video_path, glb_path, glb_path,
+                    f"Error computing metrics: {str(e)}", None, None, None,
+                )
 
-    yield (
-        final_log,
-        video_path, glb_path, glb_path,
-        metrics_report, dino_val, lpips_val, ssim_val,
-    )
+        # Final summary
+        total_time = logger.elapsed()
+        final_log = logger.log(f"Generation complete! Total time: {total_time:.1f}s")
+
+        torch.cuda.empty_cache()
+
+        yield (
+            final_log,
+            f"Complete! ({total_time:.1f}s)",
+            console.get_output(),
+            video_path, glb_path, glb_path,
+            metrics_report, dino_val, lpips_val, ssim_val,
+        )
+    finally:
+        console.stop()
 
 
 def create_ui():
@@ -528,14 +612,29 @@ def create_ui():
             with gr.Column(scale=1):
                 gr.Markdown("### Output")
 
-                # Live logs textbox
-                live_logs = gr.Textbox(
-                    label="Generation Logs",
-                    interactive=False,
-                    lines=10,
-                    max_lines=15,
-                    autoscroll=True,
-                )
+                # Logs tabs with Generation Logs and Console Output
+                with gr.Tabs():
+                    with gr.Tab("Generation Logs"):
+                        live_logs = gr.Textbox(
+                            label="Stage Progress",
+                            interactive=False,
+                            lines=10,
+                            max_lines=15,
+                            autoscroll=True,
+                        )
+                        progress_status = gr.Textbox(
+                            label="Current Progress",
+                            interactive=False,
+                            lines=1,
+                            show_label=False,
+                        )
+                    with gr.Tab("Console Output"):
+                        console_output = gr.Textbox(
+                            label="Debug/Console Output",
+                            interactive=False,
+                            lines=12,
+                            autoscroll=True,
+                        )
 
                 with gr.Tabs():
                     with gr.Tab("Video Preview"):
@@ -608,7 +707,7 @@ def create_ui():
             tex_steps, tex_guidance_strength, tex_guidance_rescale, tex_rescale_t,
             decimation_target, texture_size, compute_metrics,
             req: gr.Request,
-            progress=gr.Progress(track_tqdm=True),
+            progress=gr.Progress(),
         ):
             # Get seed
             actual_seed = get_seed(randomize, seed)
@@ -646,6 +745,8 @@ def create_ui():
             ],
             outputs=[
                 live_logs,
+                progress_status,
+                console_output,
                 video_output, model_output, download_btn,
                 metrics_output, dino_sim, lpips_val, ssim_val,
             ],
